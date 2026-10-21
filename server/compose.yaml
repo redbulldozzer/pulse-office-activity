@@ -1,0 +1,96 @@
+name: office-activity
+x-app: &app
+  image: office-activity-api:0.4.6
+  build: .
+  restart: unless-stopped
+  read_only: true
+  tmpfs: [/tmp]
+  cap_drop: [ALL]
+  security_opt: [no-new-privileges:true]
+  environment:
+    DB_HOST: db
+    DB_USER: activity
+    DB_NAME: activity
+  secrets: [db_password]
+  depends_on:
+    db: {condition: service_healthy}
+  logging:
+    driver: json-file
+    options: {max-size: 10m, max-file: '3'}
+services:
+  proxy:
+    image: nginx:stable-alpine@sha256:dc5069ad14f19660b141b21236140b91656bf89bbc3e2417c70ae650cd66104c
+    restart: unless-stopped
+    ports: [443:443]
+    volumes:
+      - ./frontend/dist:/usr/share/nginx/html:ro
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - /etc/office-activity/tls:/etc/office-activity/tls:ro
+    depends_on:
+      api: {condition: service_healthy}
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  db:
+    image: postgres:17-bookworm@sha256:051f7b7b3abdd564d5d1bd1e8c4b9c1b6e77087d1dd22020ede611c096a272e0
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_DB: activity
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_admin_password
+    secrets: [db_password, db_admin_password]
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./deploy/init-db.sh:/docker-entrypoint-initdb.d/10-activity.sh:ro
+    healthcheck:
+      test: [CMD-SHELL, pg_isready -U activity -d activity]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    logging:
+      driver: json-file
+      options: {max-size: 10m, max-file: '3'}
+  api:
+    <<: *app
+    environment:
+      DB_HOST: db
+      DB_USER: activity
+      DB_NAME: activity
+      IPA_HOST: example.invalid
+      IPA_BASE_DN: dc=example,dc=invalid
+      IPA_REALM: example.invalid
+      PUBLIC_ORIGIN: https://example.invalid
+      DASHBOARD_ADMIN_GROUP: ff729180-8f44-11f1-b48a-bc2411bbfb7d
+    extra_hosts: [example.invalid:192.0.2.1]
+    secrets: [db_password, ipa_ca]
+    ports: [127.0.0.1:8000:8000]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz',timeout=3)"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+  directory:
+    <<: *app
+    command: [python, -m, app.directory]
+    environment:
+      DB_HOST: db
+      DB_USER: activity
+      DB_NAME: activity
+      IPA_HOST: example.invalid
+      IPA_BASE_DN: dc=example,dc=invalid
+      IPA_REALM: example.invalid
+      IPA_BIND_DN: uid=office-activity,cn=sysaccounts,cn=etc,dc=example,dc=invalid
+    extra_hosts: [example.invalid:192.0.2.1]
+    secrets: [db_password, ipa_password, ipa_ca]
+    healthcheck:
+      test: [CMD, python, -c, "from app.db import connect; c=connect(); r=c.execute(\"SELECT last_success > now()-interval '15 minutes' AS healthy FROM directory_sync WHERE id=1\").fetchone(); c.close(); raise SystemExit(0 if r and r['healthy'] else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 2
+volumes:
+  postgres_data:
+secrets:
+  db_password: {file: ./secrets/db_password}
+  db_admin_password: {file: ./secrets/db_admin_password}
+  ipa_password: {file: ./secrets/ipa_password}
+  ipa_ca: {file: ./secrets/ipa_ca.crt}
