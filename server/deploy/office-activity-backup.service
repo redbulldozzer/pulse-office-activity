@@ -1,0 +1,8 @@
+[Unit]
+Description=Office Activity PostgreSQL backup
+Requires=docker.service
+After=docker.service
+[Service]
+Type=oneshot
+ExecStart=/opt/office-activity-server/deploy/backup.sh
+UMask=0077
